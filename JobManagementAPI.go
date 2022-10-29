@@ -19,62 +19,40 @@ import (
 )
 
 type FailureResponse struct {
-	Message string `json:message`
+	Id      string `json:"id"`
+	Message string `json:"message"`
 }
 
 type SuccessResponse struct {
+	Id        string `json:"id"`
 	JobId     string `json:"jobId"`
-	JobStatus string `json:"jobStatus"`
+	RequestId string `json:"requestId"`
+	JobStatus string `json:"jobStatus,omitempty"`
 	Message   string `json:"message,omitempty"`
 }
 
-func SkyflowValidation(token string, vaultId string) bool {
-	client := &http.Client{Timeout: 1 * time.Minute}
-	var managementUrl = os.Getenv("MANAGEMENT_URL")
-	var url = managementUrl + "/v1/vaults/" + vaultId
-
-	request, _ := http.NewRequest("GET", url, nil)
-	request.Header.Add("Accept", "apaplication/json")
-	request.Header.Add("Content-Type", "application/json")
-	request.Header.Add("Authorization", "Bearer "+token)
-
-	response, err := client.Do(request)
-	if err != nil {
-		log.Printf("Got error on Skyflow Validation request: %v\n", err.Error())
-		return false
-	}
-
-	if response.StatusCode != http.StatusOK {
-		responseBody, _ := io.ReadAll(response.Body)
-		defer response.Body.Close()
-
-		log.Printf("Got status on Skyflow Validation: %v\n", response.StatusCode)
-		log.Printf("Got response on Skyflow Validation: %v\n", string(responseBody))
-		return false
-	}
-	return true
+type JobDetail struct {
+	Id          string `json:"id"`
+	JobId       string `json:"jobId"`
+	JobStatus   string `json:"jobStatus"`
+	RequestId   string `json:"requestId"`
+	Query       string `json:"query"`
+	Destination string `json:"destination"`
 }
 
-func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	apiResponse := events.APIGatewayProxyResponse{}
+type SkyflowAuthorizationResponse struct {
+	RequestId    string `json:"requestId"`
+	StatusCode   int    `json:"statusCode"`
+	ResponseBody string `json:"responseBody"`
+	Error        string `json:"error"`
+}
 
-	token := request.Headers["Authorization"]
+var db *sql.DB
+var managementUrl string
+var service *emrserverless.EMRServerless
+var applicationId string
 
-	vaultId := request.PathParameters["vaultID"]
-	jobId := request.PathParameters["jobID"]
-
-	validation := SkyflowValidation(token, vaultId)
-	if !validation {
-		responseBody, _ := json.Marshal(FailureResponse{
-			Message: "Failed on Skyflow Validation",
-		})
-
-		apiResponse.Body = string(responseBody)
-		apiResponse.StatusCode = http.StatusBadRequest
-
-		return apiResponse, nil
-	}
-
+func init() {
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	user := os.Getenv("DB_USER")
@@ -89,77 +67,186 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 		password,
 		databaseName,
 	)
-	db, _ := sql.Open("postgres", connection)
+	db, _ = sql.Open("postgres", connection)
 
-	if request.HTTPMethod == "GET" {
-		var recordJobId string
-		var recordJobStatus string
-		statement := `select job_id, job_status from "job_details" where job_id=$1`
+	sess, _ := session.NewSession(&aws.Config{
+		Region: aws.String(os.Getenv("REGION")),
+	})
+	service = emrserverless.New(sess)
 
-		log.Printf("Checking record for jobId: %v\n", jobId)
-		record := db.QueryRow(statement, jobId)
+	managementUrl = os.Getenv("MANAGEMENT_URL")
 
-		switch err := record.Scan(&recordJobId, &recordJobStatus); err {
-		case sql.ErrNoRows:
-			responseBody, _ := json.Marshal(FailureResponse{
-				Message: fmt.Sprintf("No record found for jobId:%v\n", jobId),
-			})
-
-			apiResponse.Body = string(responseBody)
-			apiResponse.StatusCode = http.StatusBadRequest
-		case nil:
-			responseBody, _ := json.Marshal(SuccessResponse{
-				JobId:     recordJobId,
-				JobStatus: recordJobStatus,
-			})
-
-			apiResponse.Body = string(responseBody)
-			apiResponse.StatusCode = http.StatusOK
-		default:
-			responseBody, _ := json.Marshal(FailureResponse{
-				Message: fmt.Sprintf("Failed to check record for jobId: %v with error: %v\n", jobId, err.Error()),
-			})
-
-			apiResponse.Body = string(responseBody)
-			apiResponse.StatusCode = http.StatusBadRequest
-		}
-	}
-
-	if request.HTTPMethod == "DELETE" {
-		sess, _ := session.NewSession(&aws.Config{
-			Region: aws.String(os.Getenv("REGION")),
-		})
-
-		service := emrserverless.New(sess)
-
-		params := &emrserverless.CancelJobRunInput{
-			ApplicationId: aws.String(os.Getenv("APPLICATION_ID")),
-			JobRunId:      aws.String(jobId),
-		}
-
-		_, err := service.CancelJobRun(params)
-
-		if err != nil {
-			responseBody, _ := json.Marshal(FailureResponse{
-				Message: fmt.Sprintf("Failed to cancel job for jobId: %v with error: %v\n", jobId, err.Error()),
-			})
-
-			apiResponse.Body = string(responseBody)
-			apiResponse.StatusCode = http.StatusBadRequest
-		}
-
-		responseBody, _ := json.Marshal(SuccessResponse{
-			JobId:   jobId,
-			Message: "Successfully deleted",
-		})
-
-		apiResponse.Body = string(responseBody)
-		apiResponse.StatusCode = http.StatusOK
-	}
-
-	return apiResponse, nil
+	applicationId = os.Getenv("APPLICATION_ID")
 }
 
 func main() {
 	lambda.Start(HandleRequest)
+}
+
+func GetJobDetail(id string) (JobDetail, error) {
+	statement := `SELECT id, jobid, jobstatus, requestid, query, destination FROM emr_job_details WHERE id=$1`
+	var jobDetail JobDetail
+
+	record := db.QueryRow(statement, id)
+
+	switch err := record.Scan(
+		&jobDetail.Id,
+		&jobDetail.JobId,
+		&jobDetail.JobStatus,
+		&jobDetail.RequestId,
+		&jobDetail.Query,
+		&jobDetail.Destination,
+	); err {
+	case sql.ErrNoRows:
+		return jobDetail, sql.ErrNoRows
+	case nil:
+		return jobDetail, nil
+	default:
+		return jobDetail, err
+	}
+}
+
+func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthorizationResponse {
+	var authResponse SkyflowAuthorizationResponse
+
+	client := &http.Client{Timeout: 1 * time.Minute}
+	var url = managementUrl + "/v1/vaults/" + vaultId
+
+	request, _ := http.NewRequest("GET", url, nil)
+	request.Header.Add("Accept", "apaplication/json")
+	request.Header.Add("Content-Type", "application/json")
+	request.Header.Add("Authorization", "Bearer "+token)
+
+	response, err := client.Do(request)
+	if err != nil {
+		log.Printf("%v-> Got error on Skyflow Validation request: %v\n", id, err.Error())
+
+		authResponse.StatusCode = http.StatusInternalServerError
+		authResponse.Error = err.Error()
+		return authResponse
+	}
+
+	responseBody, _ := io.ReadAll(response.Body)
+	defer response.Body.Close()
+
+	authResponse.RequestId = response.Header.Get("x-request-id")
+	authResponse.StatusCode = response.StatusCode
+	authResponse.ResponseBody = string(responseBody)
+
+	if response.StatusCode != http.StatusOK {
+		log.Printf("%v-> Unable/Fail to call Skyflow API status code:%v and message:%v", id, response.StatusCode, string(responseBody))
+	}
+	return authResponse
+}
+
+func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	apiResponse := events.APIGatewayProxyResponse{}
+
+	token := request.Headers["Authorization"]
+
+	id := request.PathParameters["jobID"]
+	vaultId := request.PathParameters["vaultID"]
+
+	authResponse := SkyflowAuthorization(token, vaultId, id)
+	if authResponse.Error != "" {
+		responseBody, _ := json.Marshal(FailureResponse{
+			Id:      id,
+			Message: authResponse.Error,
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = authResponse.StatusCode
+		return apiResponse, nil
+	}
+
+	if authResponse.StatusCode != http.StatusOK {
+		responseBody, _ := json.Marshal(FailureResponse{
+			Id:      id,
+			Message: authResponse.ResponseBody,
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = authResponse.StatusCode
+		return apiResponse, nil
+	}
+
+	log.Printf("%v-> Checking record for id: %v\n", id, id)
+	jobDetail, err := GetJobDetail(id)
+	if err != nil {
+		log.Printf("%v-> Failed to get job details for id: %v with error: %v\n", id, id, err.Error())
+
+		responseBody, _ := json.Marshal(FailureResponse{
+			Id:      id,
+			Message: fmt.Sprintf("Failed to check record for id: %v with error: %v\n", id, err.Error()),
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = http.StatusBadRequest
+		return apiResponse, nil
+	}
+
+	if request.HTTPMethod == "GET" {
+		responseBody, _ := json.Marshal(SuccessResponse{
+			Id:        jobDetail.Id,
+			JobId:     jobDetail.JobId,
+			JobStatus: jobDetail.JobStatus,
+			RequestId: jobDetail.RequestId,
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = http.StatusOK
+		return apiResponse, nil
+	}
+
+	if request.HTTPMethod == "DELETE" {
+		if jobDetail.JobStatus == "SUCCESS" || jobDetail.JobStatus == "FAILURE" {
+			responseBody, _ := json.Marshal(FailureResponse{
+				Id:      id,
+				Message: fmt.Sprintf("Job for jobId:%v is already completed", jobDetail.JobId),
+			})
+			apiResponse.Body = string(responseBody)
+			apiResponse.StatusCode = http.StatusBadRequest
+			return apiResponse, nil
+		}
+
+		if jobDetail.JobStatus == "CANCELLING" || jobDetail.JobStatus == "CANCELLED" {
+			responseBody, _ := json.Marshal(FailureResponse{
+				Id:      id,
+				Message: fmt.Sprintf("Job for jobId:%v is already completed", jobDetail.JobId),
+			})
+			apiResponse.Body = string(responseBody)
+			apiResponse.StatusCode = http.StatusBadRequest
+			return apiResponse, nil
+		}
+
+		params := &emrserverless.CancelJobRunInput{
+			ApplicationId: aws.String(applicationId),
+			JobRunId:      aws.String(jobDetail.JobId),
+		}
+
+		_, err := service.CancelJobRun(params)
+		if err != nil {
+			responseBody, _ := json.Marshal(FailureResponse{
+				Id:      id,
+				Message: fmt.Sprintf("%v-> Failed to cancel job for jobId: %v with error: %v\n", id, jobDetail.JobId, err.Error()),
+			})
+
+			apiResponse.Body = string(responseBody)
+			apiResponse.StatusCode = http.StatusBadRequest
+			return apiResponse, nil
+		}
+
+		responseBody, _ := json.Marshal(SuccessResponse{
+			Id:        jobDetail.Id,
+			JobId:     jobDetail.JobId,
+			RequestId: jobDetail.RequestId,
+			Message:   "Successfully deleted",
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = http.StatusOK
+		return apiResponse, nil
+	}
+
+	return apiResponse, nil
 }
