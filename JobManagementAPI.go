@@ -84,6 +84,8 @@ func main() {
 }
 
 func GetJobDetail(id string) (JobDetail, error) {
+	log.Printf("%v-> Initiating GetJobDetail", id)
+
 	statement := `SELECT id, jobid, jobstatus, requestid, query, destination FROM emr_job_details WHERE id=$1`
 	var jobDetail JobDetail
 
@@ -109,8 +111,12 @@ func GetJobDetail(id string) (JobDetail, error) {
 func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthorizationResponse {
 	var authResponse SkyflowAuthorizationResponse
 
+	log.Printf("%v-> Initiating SkyflowAuthorization", id)
+
 	client := &http.Client{Timeout: 1 * time.Minute}
 	var url = managementUrl + "/v1/vaults/" + vaultId
+
+	log.Printf("%v-> Initiating Skyflow Request for Authorization", id)
 
 	request, _ := http.NewRequest("GET", url, nil)
 	request.Header.Add("Accept", "apaplication/json")
@@ -136,6 +142,9 @@ func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthor
 	if response.StatusCode != http.StatusOK {
 		log.Printf("%v-> Unable/Fail to call Skyflow API status code:%v and message:%v", id, response.StatusCode, string(responseBody))
 	}
+
+	log.Printf("%v-> Sucessfully Authorized", id)
+
 	return authResponse
 }
 
@@ -145,6 +154,9 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	token := request.Headers["Authorization"]
 
 	id := request.PathParameters["jobID"]
+
+	log.Printf("%v-> Initiated with id: %v", id, id)
+
 	vaultId := request.PathParameters["vaultID"]
 
 	authResponse := SkyflowAuthorization(token, vaultId, id)
@@ -171,6 +183,7 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	}
 
 	log.Printf("%v-> Checking record for id: %v\n", id, id)
+
 	jobDetail, err := GetJobDetail(id)
 	if err != nil {
 		log.Printf("%v-> Failed to get job details for id: %v with error: %v\n", id, id, err.Error())
@@ -184,6 +197,8 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 		apiResponse.StatusCode = http.StatusBadRequest
 		return apiResponse, nil
 	}
+
+	log.Printf("%v-> Successfully Executed query", id)
 
 	if request.HTTPMethod == "GET" {
 		responseBody, _ := json.Marshal(SuccessResponse{
@@ -212,7 +227,7 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 		if jobDetail.JobStatus == "CANCELLING" || jobDetail.JobStatus == "CANCELLED" {
 			responseBody, _ := json.Marshal(FailureResponse{
 				Id:      id,
-				Message: fmt.Sprintf("Job for jobId:%v is already completed", jobDetail.JobId),
+				Message: fmt.Sprintf("Job for jobId:%v is already cancelled", jobDetail.JobId),
 			})
 			apiResponse.Body = string(responseBody)
 			apiResponse.StatusCode = http.StatusBadRequest
@@ -224,17 +239,21 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 			JobRunId:      aws.String(jobDetail.JobId),
 		}
 
+		log.Printf("%v-> Cancelling job", id)
+
 		_, err := service.CancelJobRun(params)
 		if err != nil {
 			responseBody, _ := json.Marshal(FailureResponse{
 				Id:      id,
-				Message: fmt.Sprintf("%v-> Failed to cancel job for jobId: %v with error: %v\n", id, jobDetail.JobId, err.Error()),
+				Message: fmt.Sprintf("Failed to cancel job for jobId: %v with error: %v\n", jobDetail.JobId, err.Error()),
 			})
 
 			apiResponse.Body = string(responseBody)
 			apiResponse.StatusCode = http.StatusBadRequest
 			return apiResponse, nil
 		}
+
+		log.Printf("%v-> Successfully cancelled job", id)
 
 		responseBody, _ := json.Marshal(SuccessResponse{
 			Id:        jobDetail.Id,
