@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/events"
@@ -155,10 +156,8 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 
 	log.Printf("%v-> Initiated with id: %v", id, id)
 
-	clientIpAddress, IpPresent := request.Headers["CF-Connecting-IP"]
-	if IpPresent {
-		log.Printf("%v-> Client IP address: %v", id, clientIpAddress)
-	}
+	clientIpAddress := strings.Split(request.Headers["X-Forwarded-For"], ",")[0]
+	log.Printf("%v-> Client IP address: %v", id, clientIpAddress)
 
 	vaultId := request.PathParameters["vaultID"]
 
