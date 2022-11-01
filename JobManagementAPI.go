@@ -143,8 +143,6 @@ func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthor
 		log.Printf("%v-> Unable/Fail to call Skyflow API status code:%v and message:%v", id, response.StatusCode, string(responseBody))
 	}
 
-	log.Printf("%v-> Sucessfully Authorized", id)
-
 	return authResponse
 }
 
@@ -181,6 +179,8 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 		apiResponse.StatusCode = authResponse.StatusCode
 		return apiResponse, nil
 	}
+
+	log.Printf("%v-> Sucessfully Authorized", id)
 
 	log.Printf("%v-> Checking record for id: %v\n", id, id)
 
