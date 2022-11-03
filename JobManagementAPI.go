@@ -163,8 +163,8 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	vaultId := request.PathParameters["vaultID"]
 	token := request.Headers["Authorization"]
 
-	authScheme := strings.Split(token, " ")[0]
-	if authScheme != "Bearer" {
+	authSchemeValidation := ValidateAuthScheme(token)
+	if !authSchemeValidation {
 		responseBody, _ := json.Marshal(FailureResponse{
 			Id:      id,
 			Message: "Auth Scheme not supported",
@@ -300,6 +300,15 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	}
 
 	return apiResponse, nil
+}
+
+func ValidateAuthScheme(token string) bool {
+	authScheme := strings.Split(token, " ")[0]
+
+	if authScheme != "Bearer" {
+		return false
+	}
+	return true
 }
 
 func ValidateVaultId(vaultId string) bool {
