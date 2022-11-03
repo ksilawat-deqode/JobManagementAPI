@@ -52,6 +52,7 @@ var db *sql.DB
 var managementUrl string
 var service *emrserverless.EMRServerless
 var applicationId string
+var validVaultIds []string
 
 func init() {
 	host := os.Getenv("DB_HOST")
@@ -78,6 +79,8 @@ func init() {
 	managementUrl = os.Getenv("MANAGEMENT_URL")
 
 	applicationId = os.Getenv("APPLICATION_ID")
+
+	validVaultIds = strings.Split(os.Getenv("VALID_VAULT_IDS"), ",")
 }
 
 func main() {
@@ -158,7 +161,6 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	log.Printf("%v-> Client IP address: %v", id, clientIpAddress)
 
 	vaultId := request.PathParameters["vaultID"]
-
 	token := request.Headers["Authorization"]
 
 	authScheme := strings.Split(token, " ")[0]
@@ -170,6 +172,19 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 
 		apiResponse.Body = string(responseBody)
 		apiResponse.StatusCode = http.StatusUnauthorized
+
+		return apiResponse, nil
+	}
+
+	validVaultIdValidation := ValidateVaultId(vaultId)
+	if !validVaultIdValidation {
+		responseBody, _ := json.Marshal(FailureResponse{
+			Id:      id,
+			Message: "Invalid Vault ID",
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = http.StatusForbidden
 
 		return apiResponse, nil
 	}
@@ -285,4 +300,13 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	}
 
 	return apiResponse, nil
+}
+
+func ValidateVaultId(vaultId string) bool {
+	for _, validVaultId := range validVaultIds {
+		if vaultId == validVaultId {
+			return true
+		}
+	}
+	return false
 }
