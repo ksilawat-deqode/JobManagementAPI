@@ -87,69 +87,6 @@ func main() {
 	lambda.Start(HandleRequest)
 }
 
-func GetJobDetail(id string) (JobDetail, error) {
-	log.Printf("%v-> Initiating GetJobDetail", id)
-
-	statement := `SELECT id, jobid, jobstatus, requestid, query, destination FROM emr_job_details WHERE id=$1`
-	var jobDetail JobDetail
-
-	record := db.QueryRow(statement, id)
-
-	switch err := record.Scan(
-		&jobDetail.Id,
-		&jobDetail.JobId,
-		&jobDetail.JobStatus,
-		&jobDetail.RequestId,
-		&jobDetail.Query,
-		&jobDetail.Destination,
-	); err {
-	case sql.ErrNoRows:
-		return jobDetail, sql.ErrNoRows
-	case nil:
-		return jobDetail, nil
-	default:
-		return jobDetail, err
-	}
-}
-
-func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthorizationResponse {
-	var authResponse SkyflowAuthorizationResponse
-
-	log.Printf("%v-> Initiating SkyflowAuthorization", id)
-
-	client := &http.Client{Timeout: 1 * time.Minute}
-	var url = managementUrl + "/v1/vaults/" + vaultId
-
-	log.Printf("%v-> Initiating Skyflow Request for Authorization", id)
-
-	request, _ := http.NewRequest("GET", url, nil)
-	request.Header.Add("Accept", "apaplication/json")
-	request.Header.Add("Content-Type", "application/json")
-	request.Header.Add("Authorization", token)
-
-	response, err := client.Do(request)
-	if err != nil {
-		log.Printf("%v-> Got error on Skyflow Validation request: %v\n", id, err.Error())
-
-		authResponse.StatusCode = http.StatusInternalServerError
-		authResponse.Error = err.Error()
-		return authResponse
-	}
-
-	responseBody, _ := io.ReadAll(response.Body)
-	defer response.Body.Close()
-
-	authResponse.RequestId = response.Header.Get("x-request-id")
-	authResponse.StatusCode = response.StatusCode
-	authResponse.ResponseBody = string(responseBody)
-
-	if response.StatusCode != http.StatusOK {
-		log.Printf("%v-> Unable/Fail to call Skyflow API status code:%v and message:%v", id, response.StatusCode, string(responseBody))
-	}
-
-	return authResponse
-}
-
 func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
 	apiResponse := events.APIGatewayProxyResponse{}
 
@@ -300,6 +237,69 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	}
 
 	return apiResponse, nil
+}
+
+func GetJobDetail(id string) (JobDetail, error) {
+	log.Printf("%v-> Initiating GetJobDetail", id)
+
+	statement := `SELECT id, jobid, jobstatus, requestid, query, destination FROM emr_job_details WHERE id=$1`
+	var jobDetail JobDetail
+
+	record := db.QueryRow(statement, id)
+
+	switch err := record.Scan(
+		&jobDetail.Id,
+		&jobDetail.JobId,
+		&jobDetail.JobStatus,
+		&jobDetail.RequestId,
+		&jobDetail.Query,
+		&jobDetail.Destination,
+	); err {
+	case sql.ErrNoRows:
+		return jobDetail, sql.ErrNoRows
+	case nil:
+		return jobDetail, nil
+	default:
+		return jobDetail, err
+	}
+}
+
+func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthorizationResponse {
+	var authResponse SkyflowAuthorizationResponse
+
+	log.Printf("%v-> Initiating SkyflowAuthorization", id)
+
+	client := &http.Client{Timeout: 1 * time.Minute}
+	var url = managementUrl + "/v1/vaults/" + vaultId
+
+	log.Printf("%v-> Initiating Skyflow Request for Authorization", id)
+
+	request, _ := http.NewRequest("GET", url, nil)
+	request.Header.Add("Accept", "apaplication/json")
+	request.Header.Add("Content-Type", "application/json")
+	request.Header.Add("Authorization", token)
+
+	response, err := client.Do(request)
+	if err != nil {
+		log.Printf("%v-> Got error on Skyflow Validation request: %v\n", id, err.Error())
+
+		authResponse.StatusCode = http.StatusInternalServerError
+		authResponse.Error = err.Error()
+		return authResponse
+	}
+
+	responseBody, _ := io.ReadAll(response.Body)
+	defer response.Body.Close()
+
+	authResponse.RequestId = response.Header.Get("x-request-id")
+	authResponse.StatusCode = response.StatusCode
+	authResponse.ResponseBody = string(responseBody)
+
+	if response.StatusCode != http.StatusOK {
+		log.Printf("%v-> Unable/Fail to call Skyflow API status code:%v and message:%v", id, response.StatusCode, string(responseBody))
+	}
+
+	return authResponse
 }
 
 func ValidateAuthScheme(token string) bool {
