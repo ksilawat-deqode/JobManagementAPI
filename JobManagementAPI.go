@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -16,7 +15,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/emrserverless"
+	"github.com/golang-jwt/jwt"
 	_ "github.com/lib/pq"
+	log "github.com/sirupsen/logrus"
 )
 
 type FailureResponse struct {
@@ -39,6 +40,8 @@ type JobDetail struct {
 	RequestId   string `json:"requestId"`
 	Query       string `json:"query"`
 	Destination string `json:"destination"`
+	Jti         string `json:"jti"`
+	Region      string `json:"cross_bucket_region"`
 }
 
 type SkyflowAuthorizationResponse struct {
@@ -48,13 +51,17 @@ type SkyflowAuthorizationResponse struct {
 	Error        string `json:"error"`
 }
 
+var logger *log.Entry
 var db *sql.DB
 var managementUrl string
 var service *emrserverless.EMRServerless
 var applicationId string
 var validVaultIds []string
+var source string
 
 func init() {
+	log.SetFormatter(&log.JSONFormatter{})
+
 	host := os.Getenv("DB_HOST")
 	port := os.Getenv("DB_PORT")
 	user := os.Getenv("DB_USER")
@@ -81,6 +88,8 @@ func init() {
 	applicationId = os.Getenv("APPLICATION_ID")
 
 	validVaultIds = strings.Split(os.Getenv("VALID_VAULT_IDS"), ",")
+
+	source = "JobManagementAPI"
 }
 
 func main() {
@@ -91,11 +100,19 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 	apiResponse := events.APIGatewayProxyResponse{}
 
 	id := request.PathParameters["jobID"]
+	logger = log.WithFields(log.Fields{
+		"id":     id,
+		"source": source,
+	})
 
-	log.Printf("%v-> Initiated with id: %v", id, id)
+	logger.Info(fmt.Sprintf("Initiated %v", source))
 
 	clientIpAddress := strings.Split(request.Headers["X-Forwarded-For"], ",")[0]
-	log.Printf("%v-> Client IP address: %v", id, clientIpAddress)
+	logger.Info(fmt.Sprintf("Client IP address: %v", clientIpAddress))
+
+	logger = logger.WithFields(log.Fields{
+		"clientIp": clientIpAddress,
+	})
 
 	vaultId := request.PathParameters["vaultID"]
 	token := request.Headers["Authorization"]
@@ -112,6 +129,23 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 
 		return apiResponse, nil
 	}
+
+	jti, err := ExtractJTI(token)
+	if err != nil {
+		responseBody, _ := json.Marshal(FailureResponse{
+			Id:      id,
+			Message: fmt.Sprintf("Failed to extract jti with error: %v", err.Error()),
+		})
+
+		apiResponse.Body = string(responseBody)
+		apiResponse.StatusCode = http.StatusForbidden
+
+		return apiResponse, nil
+	}
+
+	logger = logger.WithFields(log.Fields{
+		"jti": jti,
+	})
 
 	validVaultIdValidation := ValidateVaultId(vaultId)
 	if !validVaultIdValidation {
@@ -149,13 +183,17 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 		return apiResponse, nil
 	}
 
-	log.Printf("%v-> Sucessfully Authorized", id)
+	logger = logger.WithFields(log.Fields{
+		"skyflowRequestId": authResponse.RequestId,
+	})
 
-	log.Printf("%v-> Checking record for id: %v\n", id, id)
+	logger.Info("Sucessfully Authorized")
+
+	logger.Info(fmt.Sprintf("Checking record for id: %v", id))
 
 	jobDetail, err := GetJobDetail(id)
 	if err != nil {
-		log.Printf("%v-> Failed to get job details for id: %v with error: %v\n", id, id, err.Error())
+		logger.Error(fmt.Sprintf("Failed to get job details for id: %v with error: %v", id, err.Error()))
 
 		responseBody, _ := json.Marshal(FailureResponse{
 			Id:      id,
@@ -167,7 +205,13 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 		return apiResponse, nil
 	}
 
-	log.Printf("%v-> Successfully Executed query", id)
+	logger = logger.WithFields(log.Fields{
+		"query":             jobDetail.Query,
+		"destinationBucket": jobDetail.Destination,
+		"region":            jobDetail.Region,
+	})
+
+	logger.Info("Successfully Executed query")
 
 	if request.HTTPMethod == "GET" {
 		responseBody, _ := json.Marshal(SuccessResponse{
@@ -208,7 +252,7 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 			JobRunId:      aws.String(jobDetail.JobId),
 		}
 
-		log.Printf("%v-> Cancelling job", id)
+		logger.Info("Cancelling job")
 
 		_, err := service.CancelJobRun(params)
 		if err != nil {
@@ -222,7 +266,7 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 			return apiResponse, nil
 		}
 
-		log.Printf("%v-> Successfully cancelled job", id)
+		logger.Info("Successfully cancelled job")
 
 		responseBody, _ := json.Marshal(SuccessResponse{
 			Id:        jobDetail.Id,
@@ -240,9 +284,9 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 }
 
 func GetJobDetail(id string) (JobDetail, error) {
-	log.Printf("%v-> Initiating GetJobDetail", id)
+	logger.Info("Initiating GetJobDetail")
 
-	statement := `SELECT id, jobid, jobstatus, requestid, query, destination FROM emr_job_details WHERE id=$1`
+	statement := `SELECT id, jobid, jobstatus, requestid, query, destination, jti, cross_bucket_region FROM emr_job_details WHERE id=$1`
 	var jobDetail JobDetail
 
 	record := db.QueryRow(statement, id)
@@ -254,6 +298,8 @@ func GetJobDetail(id string) (JobDetail, error) {
 		&jobDetail.RequestId,
 		&jobDetail.Query,
 		&jobDetail.Destination,
+		&jobDetail.Jti,
+		&jobDetail.Region,
 	); err {
 	case sql.ErrNoRows:
 		return jobDetail, sql.ErrNoRows
@@ -267,12 +313,12 @@ func GetJobDetail(id string) (JobDetail, error) {
 func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthorizationResponse {
 	var authResponse SkyflowAuthorizationResponse
 
-	log.Printf("%v-> Initiating SkyflowAuthorization", id)
+	logger.Info("Initiating SkyflowAuthorization")
 
 	client := &http.Client{Timeout: 1 * time.Minute}
 	var url = managementUrl + "/v1/vaults/" + vaultId
 
-	log.Printf("%v-> Initiating Skyflow Request for Authorization", id)
+	logger.Info("Initiating Skyflow Request for Authorization")
 
 	request, _ := http.NewRequest("GET", url, nil)
 	request.Header.Add("Accept", "apaplication/json")
@@ -281,7 +327,7 @@ func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthor
 
 	response, err := client.Do(request)
 	if err != nil {
-		log.Printf("%v-> Got error on Skyflow Validation request: %v\n", id, err.Error())
+		logger.Error(fmt.Sprintf("Got error on Skyflow Validation request: %v", err.Error()))
 
 		authResponse.StatusCode = http.StatusInternalServerError
 		authResponse.Error = err.Error()
@@ -296,13 +342,15 @@ func SkyflowAuthorization(token string, vaultId string, id string) SkyflowAuthor
 	authResponse.ResponseBody = string(responseBody)
 
 	if response.StatusCode != http.StatusOK {
-		log.Printf("%v-> Unable/Fail to call Skyflow API status code:%v and message:%v", id, response.StatusCode, string(responseBody))
+		logger.Error(fmt.Sprintf("Unable/Fail to call Skyflow API status code:%v and message:%v", response.StatusCode, string(responseBody)))
 	}
 
 	return authResponse
 }
 
 func ValidateAuthScheme(token string) bool {
+	logger.Info("Initiating ValidateAuthScheme")
+
 	authScheme := strings.Split(token, " ")[0]
 
 	if authScheme != "Bearer" {
@@ -312,10 +360,31 @@ func ValidateAuthScheme(token string) bool {
 }
 
 func ValidateVaultId(vaultId string) bool {
+	logger.Info("Initiating ValidateVaultId")
+
 	for _, validVaultId := range validVaultIds {
 		if vaultId == validVaultId {
 			return true
 		}
 	}
 	return false
+}
+
+func ExtractJTI(authToken string) (string, error) {
+	logger.Info("Initiating ExtractJTI")
+
+	tokenString := strings.Split(authToken, " ")[1]
+
+	logger.Info("Initiating token parsing")
+	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	if err != nil {
+		logger.Error(fmt.Sprintf("Got error: %v in token parsing", err.Error()))
+		return "", err
+	}
+
+	logger.Info("Successfully parsed token")
+	claims := token.Claims.(jwt.MapClaims)
+	jti := claims["jti"].(string)
+
+	return jti, nil
 }
