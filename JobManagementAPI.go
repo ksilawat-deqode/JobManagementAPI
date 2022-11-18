@@ -101,8 +101,8 @@ func HandleRequest(request events.APIGatewayProxyRequest) (events.APIGatewayProx
 
 	id := request.PathParameters["jobID"]
 	logger = log.WithFields(log.Fields{
-		"id":     id,
-		"source": source,
+		"queryId": id,
+		"source":  source,
 	})
 
 	logger.Info(fmt.Sprintf("Initiated %v", source))
