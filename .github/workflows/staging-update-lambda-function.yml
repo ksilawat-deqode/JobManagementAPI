@@ -1,0 +1,43 @@
+name: deploy to lambda
+on:
+ push:
+  branches:
+      - staging
+env:
+  FUNCTION_NAME: marketscan-ccf-staging-job-management
+  TARGET_BUCKET: marketscan-ccf-staging-bdata-manage
+  ZIP_FILE: lambda_function_payload.zip
+
+jobs:
+
+  deploy_zip:
+    name: deploy lambda function
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.19.x]
+    steps:
+      - name: checkout source code
+        uses: actions/checkout@v1
+      - name: Install Go
+        uses: actions/setup-go@v1
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Build binary
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main JobManagementAPI.go && zip -jrm ${{ env.ZIP_FILE }} main
+      - name: Set AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.STAGING_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.STAGING_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-west-1
+      - name: Deploy to S3
+        run: aws s3 cp ${{ env.ZIP_FILE }} s3://${{ env.TARGET_BUCKET }}
+      - name: AWS Lambda Deploy
+        # if: github.ref == 'refs/heads/main'
+        uses: appleboy/lambda-action@master
+        with:
+          function_name: ${{ env.FUNCTION_NAME }}
+          s3_bucket: ${{ env.TARGET_BUCKET }}
+          zip_file: ${{ env.ZIP_FILE }}
